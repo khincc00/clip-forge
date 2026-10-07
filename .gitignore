@@ -1,0 +1,11 @@
+node_modules
+dist
+storage
+.env
+.DS_Store
+desktop/node_modules
+desktop/release
+desktop/INSTALLER
+desktop/resources
+desktop/app/server
+desktop/app/dist
