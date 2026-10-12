@@ -14,6 +14,8 @@ import ffmpegStaticPath from 'ffmpeg-static'
 import ffprobe from 'ffprobe-static'
 import { spawn, execFile } from 'node:child_process'
 import { scoreVideo, detectSilences, buildKeepSegments, remapWords } from './scoring.js'
+import { selectClipsWithLlm } from './llm-selection.js'
+import Anthropic from '@anthropic-ai/sdk'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ffmpegPath = ffmpegStaticPath.includes('app.asar' + path.sep) ? ffmpegStaticPath.replace('app.asar' + path.sep, 'app.asar.unpacked' + path.sep) : ffmpegStaticPath
@@ -483,19 +485,45 @@ async function processJob(job) {
   job.status = 'processing'
   job.progress = 15
   let highlights
-  try {
-    const scoring = await scoreVideo({
-      ffmpegPath, source, duration, words: captionCues,
-      maxClips: job.clipCount,
-      facePoints: (start, length) => facePointsFor(source, start, length),
-      onProgress: (message) => { job.message = message },
-    })
-    job.scoredWithTranscript = scoring.transcript
-    highlights = scoring.clips
-  } catch (error) {
-    console.warn('Scoring:', error.message)
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  if (!apiKey) {
+    job.selectionNote = 'API key Claude belum diisi, memakai penilaian lokal.'
+  } else if (!captionCues.length) {
+    job.selectionNote = 'Tidak ada transkrip, memakai penilaian lokal.'
+  } else {
+    try {
+      highlights = await selectClipsWithLlm({
+        client: new Anthropic({ apiKey }),
+        model: process.env.CLIPFORGE_LLM_MODEL || 'claude-opus-5-5',
+        words: captionCues, duration, maxClips: job.clipCount,
+        onProgress: (message) => { job.message = message },
+      })
+      if (highlights?.length) Object.assign(job, { selectedBy: 'llm', scoredWithTranscript: true })
+      else job.selectionNote = 'Claude tidak menemukan momen yang valid, memakai penilaian lokal.'
+    } catch (error) {
+      job.selectionNote = `Claude gagal, memakai penilaian lokal: ${error.message.slice(0, 160)}`
+      console.warn('LLM selection:', error.message)
+    }
   }
-  if (!highlights?.length) highlights = createHighlights(duration, job.clipCount).map((clip) => ({ ...clip, score: String(94 - (clip.id - 1) * 4) }))
+  if (!highlights?.length) {
+    try {
+      const scoring = await scoreVideo({
+        ffmpegPath, source, duration, words: captionCues,
+        maxClips: job.clipCount,
+        facePoints: (start, length) => facePointsFor(source, start, length),
+        onProgress: (message) => { job.message = message },
+      })
+      job.scoredWithTranscript = scoring.transcript
+      highlights = scoring.clips
+      if (highlights.length) job.selectedBy = 'heuristic'
+    } catch (error) {
+      console.warn('Scoring:', error.message)
+    }
+  }
+  if (!highlights?.length) {
+    job.selectedBy = 'fallback'
+    highlights = createHighlights(duration, job.clipCount).map((clip) => ({ ...clip, score: String(94 - (clip.id - 1) * 4) }))
+  }
   job.message = 'Memotong momen terbaik dengan FFmpeg'
   job.progress = 30
   for (let index = 0; index < highlights.length; index += 1) {
@@ -568,7 +596,7 @@ app.post('/api/jobs', (request, response) => {
 app.get('/api/jobs/:id', (request, response) => {
   const job = jobs.get(request.params.id)
   if (!job) return response.status(404).json({ error: 'Job tidak ditemukan.' })
-  response.json({ id: job.id, status: job.status, progress: job.progress, message: job.message, captionStatus: job.captionStatus, scoredWithTranscript: job.scoredWithTranscript, faceTracking: job.faceTracking, faceTracked: Boolean(job.faceTracked), clips: job.clips.map((clip) => ({ ...clip, downloadUrl: `/api/jobs/${job.id}/clips/${clip.filename}` })) })
+  response.json({ id: job.id, status: job.status, progress: job.progress, message: job.message, captionStatus: job.captionStatus, scoredWithTranscript: job.scoredWithTranscript, selectedBy: job.selectedBy, selectionNote: job.selectionNote, faceTracking: job.faceTracking, faceTracked: Boolean(job.faceTracked), clips: job.clips.map((clip) => ({ ...clip, downloadUrl: `/api/jobs/${job.id}/clips/${clip.filename}` })) })
 })
 
 app.get('/api/jobs/:id/clips/:filename', async (request, response) => {
@@ -582,6 +610,29 @@ if (process.env.CLIPFORGE_STATIC) {
   app.use(express.static(process.env.CLIPFORGE_STATIC))
   app.get(/^\/(?!api\/|media\/).*/, (_request, response) => response.sendFile(path.join(process.env.CLIPFORGE_STATIC, 'index.html')))
 }
+
+// Job folders hold the source video and rendered clips. Keep only the two most recent ones,
+// but never remove a job that is still queued, downloading or processing.
+const keepJobs = 2
+setInterval(async () => {
+  try {
+    const folders = []
+    for (const entry of await fs.readdir(jobsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const stat = await fs.stat(path.join(jobsDir, entry.name)).catch(() => null)
+      if (stat) folders.push({ name: entry.name, mtimeMs: stat.mtimeMs })
+    }
+    folders.sort((a, b) => b.mtimeMs - a.mtimeMs)
+    for (const { name } of folders.slice(keepJobs)) {
+      const job = jobs.get(name)
+      if (job && !['completed', 'failed'].includes(job.status)) continue
+      jobs.delete(name)
+      await fs.rm(path.join(jobsDir, name), { recursive: true, force: true })
+    }
+  } catch (error) {
+    console.warn('Cleanup job lama:', error.message)
+  }
+}, 10 * 60 * 1000)
 
 const server = http.createServer(app)
 // Long videos keep requests and sockets busy for many minutes; never cut them off from the server side.

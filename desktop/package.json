@@ -1,7 +1,7 @@
 {
   "name": "clipforge-desktop",
   "productName": "ClipForge",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "ClipForge auto clipper desktop",
   "author": "ClipForge",
   "main": "app/main.cjs",
@@ -11,6 +11,7 @@
     "dist": "bash prepare.sh && electron-builder --mac dmg --arm64"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.133.0",
     "@distube/ytdl-core": "^4.16.12",
     "cors": "^2.8.6",
     "express": "^5.2.1",

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'">
+  <title>Pengaturan Claude API</title>
+  <style>
+    body { margin: 0; padding: 24px; background: #171c1b; color: #e8ece9; font: 14px -apple-system, BlinkMacSystemFont, sans-serif; }
+    h1 { font-size: 18px; margin: 0 0 6px; }
+    p { margin: 0 0 16px; color: #a9b3ad; line-height: 1.5; }
+    label { display: block; font-weight: 600; margin-bottom: 6px; }
+    input, select { width: 100%; box-sizing: border-box; padding: 9px 10px; margin-bottom: 14px; border-radius: 8px; border: 1px solid #3a4540; background: #0f1312; color: inherit; font: inherit; }
+    .state { font-size: 12px; margin: -8px 0 16px; color: #a9b3ad; }
+    .actions { display: flex; gap: 10px; align-items: center; }
+    button { padding: 9px 16px; border-radius: 8px; border: 0; font: inherit; cursor: pointer; background: #ff6a3d; color: #fff; font-weight: 600; }
+    button.secondary { background: transparent; color: #e8ece9; border: 1px solid #3a4540; font-weight: 500; }
+    button[hidden] { display: none; }
+    #status { margin-top: 14px; font-size: 13px; min-height: 18px; }
+    #status.ok { color: #7fd69a; }
+    #status.error { color: #ff8a8a; }
+  </style>
+</head>
+<body>
+  <h1>Pengaturan Claude API</h1>
+  <p>Key dipakai untuk memilih momen terbaik dari transkrip video. Tanpa key, ClipForge memakai penilaian lokal. Biaya pemakaian ditagih oleh Anthropic sesuai jumlah token.</p>
+
+  <form>
+    <label for="apiKey">API key</label>
+    <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…">
+    <div id="keyState" class="state"></div>
+
+    <label for="model">Model</label>
+    <select id="model">
+      <option value="claude-opus-5-5">Opus 5.5 (kualitas terbaik)</option>
+      <option value="claude-sonnet-5-5">Sonnet 5.5 (seimbang)</option>
+      <option value="claude-haiku-5-5">Haiku 5.5 (paling murah)</option>
+    </select>
+
+    <div class="actions">
+      <button type="submit">Simpan</button>
+      <button type="button" id="clear" class="secondary" hidden>Hapus key</button>
+    </div>
+    <div id="status" role="status"></div>
+  </form>
+
+  <script src="settings.js"></script>
+</body>
+</html>
