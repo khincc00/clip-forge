@@ -13,9 +13,9 @@ const YTDlpWrap = YTDlpWrapModule.default || YTDlpWrapModule
 import ffmpegStaticPath from 'ffmpeg-static'
 import ffprobe from 'ffprobe-static'
 import { spawn, execFile } from 'node:child_process'
-import { scoreVideo, detectSilences, buildKeepSegments, remapWords } from './scoring.js'
-import { selectClipsWithLlm } from './llm-selection.js'
-import Anthropic from '@anthropic-ai/sdk'
+import { scoreVideo, detectSilences, buildKeepSegments, remapWords, buildSegments } from './scoring.js'
+import { selectClipsWithLlm, LLM_PROVIDERS } from './llm-selection.js'
+import { localBeats, totalLength, keepRanges, timelineOf, ctaOverlay, buildBeatArgs, buildConcatArgs } from './structure.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const ffmpegPath = ffmpegStaticPath.includes('app.asar' + path.sep) ? ffmpegStaticPath.replace('app.asar' + path.sep, 'app.asar.unpacked' + path.sep) : ffmpegStaticPath
@@ -24,6 +24,7 @@ const faceScript = path.join(__dirname, 'face_track.py').replace('app.asar' + pa
 const rootDir = path.resolve(__dirname, '..')
 const dataDir = process.env.CLIPFORGE_DATA_DIR || path.join(rootDir, 'storage')
 const jobsDir = path.join(dataDir, 'jobs')
+const uploadsDir = path.join(dataDir, 'uploads')
 const binaryDir = path.join(dataDir, 'bin')
 const modelDir = path.join(dataDir, 'models')
 const faceModelPath = path.join(modelDir, 'yunet.onnx')
@@ -31,8 +32,12 @@ const faceModelUrl = 'https://github.com/opencv/opencv_zoo/raw/main/models/face_
 const ytDlpBinary = path.join(binaryDir, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp')
 const port = Number(process.env.PORT || 8787)
 const jobs = new Map()
+// Video lokal yang sudah diunggah tapi belum dipakai job. Dihapus jika tidak dipakai dalam 1 jam.
+const uploads = new Map()
+const videoExtensions = ['.mp4', '.mov', '.mkv', '.webm', '.m4v', '.avi']
 
 await fs.mkdir(jobsDir, { recursive: true })
+await fs.mkdir(uploadsDir, { recursive: true })
 await fs.mkdir(binaryDir, { recursive: true })
 
 async function getYtDlp() {
@@ -248,35 +253,35 @@ const captionTemplates = {
     spoken: { c: '&H00FFFFFF', a: '&H00&' }, active: { c: '&H00FFFFFF', a: '&H00&' }, upcoming: '&H8C&',
     outline: 2, shadow: 3, outlineColor: '&H00000000', pop: 100, spacing: -1,
   },
-  bigword: {
-    font: 'Helvetica Neue', size: [96, 150], bold: -1, italic: 0, upper: false, chunk: [[14, 1], [14, 1]], y: [0.7, 0.6],
-    spoken: { c: '&H00FFFFFF', a: '&H00&' }, active: { c: '&H00FFFFFF', a: '&H00&' }, upcoming: '&H00&',
-    outline: 3, shadow: 4, outlineColor: '&H00000000', pop: 70, spacing: -3,
-  },
-  highlight: {
-    font: 'Impact', size: [66, 92], bold: 0, italic: 0, upper: true, chunk: [[24, 3], [16, 3]], y: [0.84, 0.66],
-    spoken: { c: '&H00FFFFFF', a: '&H00&' }, active: { c: '&H00000000', a: '&H00&', outlineColor: '&H0000E6FF', bord: 16 }, upcoming: '&H00&',
-    outline: 5, shadow: 0, outlineColor: '&H00000000', pop: 112, spacing: 1,
-  },
   neon: {
     font: 'Helvetica Neue', size: [52, 64], bold: -1, italic: 0, upper: false, chunk: [[34, 4], [24, 4]], y: [0.8, 0.6], anchor: 5, stack: true,
     spoken: { c: '&H0033FFC8&', a: '&H00&' }, active: { c: '&H0033FFC8&', a: '&H00&' }, upcoming: '&H8C&',
     outline: 0, shadow: 0, outlineColor: '&H0010C890&', pop: 100, spacing: -2, keyScale: 2.1, smallScale: 0.8, glow: { bord: 9, blur: 7, a: '&H78&' },
   },
-  editorial: {
-    font: 'Helvetica Neue', size: [44, 56], bold: -1, italic: 0, upper: false, chunk: [[34, 4], [24, 4]], y: [0.8, 0.58], anchor: 5, stack: true,
-    spoken: { c: '&H00FFFFFF', a: '&H00&' }, active: { c: '&H00FFFFFF', a: '&H00&' }, upcoming: '&H99&',
-    outline: 1, shadow: 3, outlineColor: '&H00000000', pop: 100, spacing: -2, keyScale: 2.1, smallScale: 0.85,
-    key: { font: 'Georgia', italic: -1, bold: 0, c: '&H002030D8&' },
+  blurstack: {
+    font: 'Helvetica Neue', size: [58, 80], bold: -1, italic: 0, upper: false, chunk: [[24, 3], [18, 3]], y: [0.82, 0.62], anchor: 5, stack: true, blurIn: true,
+    spoken: { c: '&H00FFFFFF', a: '&H00&' }, active: { c: '&H00FFFFFF', a: '&H00&' }, upcoming: '&H59&',
+    outline: 0, shadow: 4, outlineColor: '&H00000000', pop: 100, spacing: -1, keyScale: 1.7, smallScale: 0.85,
   },
-  serif: {
-    font: 'Georgia', size: [56, 88], bold: 0, italic: 0, upper: false, chunk: [[30, 4], [22, 3]], y: [0.84, 0.62],
-    spoken: { c: '&H00FFFFFF', a: '&H00&' }, active: { c: '&H00FFFFFF', a: '&H00&' }, upcoming: '&HFF&',
-    outline: 1, shadow: 3, outlineColor: '&H00000000', pop: 100, spacing: 0,
+  kinetic: {
+    font: 'Helvetica Neue', size: [78, 110], bold: -1, italic: 0, upper: true, chunk: [[16, 2], [12, 2]], y: [0.7, 0.55],
+    spoken: { c: '&H00FFFFFF', a: '&H00&' }, active: { c: '&H0000E6FF&', a: '&H00&' }, upcoming: '&H00&',
+    outline: 6, shadow: 0, outlineColor: '&H00000000', pop: 120, spacing: -2,
+  },
+  retro: {
+    font: 'Impact', size: [66, 92], bold: 0, italic: 0, upper: true, chunk: [[20, 2], [14, 2]], y: [0.8, 0.6],
+    spoken: { c: '&H00C8E9F5&', a: '&H00&' }, active: { c: '&H00C8E9F5&', a: '&H00&' }, upcoming: '&H00&',
+    outline: 7, shadow: 3, outlineColor: '&H00182030&', pop: 100, spacing: 1,
+  },
+  offer: {
+    font: 'Helvetica Neue', size: [64, 88], bold: -1, italic: 0, upper: false, chunk: [[22, 3], [16, 3]], y: [0.8, 0.6],
+    spoken: { c: '&H00FF6B1E&', a: '&H00&' }, active: { c: '&H00FF6B1E&', a: '&H00&' }, upcoming: '&H00&',
+    outline: 4, shadow: 0, outlineColor: '&H00FFFFFF&', pop: 110, spacing: 0,
   },
 }
 
-async function writeAssCaptions(clip, words, target, outputFormat, template) {
+// overlays: teks yang tampil di atas video pada rentang waktu tertentu (dipakai untuk CTA komen).
+async function writeAssCaptions(clip, words, target, outputFormat, template, overlays = []) {
   const portrait = outputFormat === 'portrait'
   const width = portrait ? 1080 : 1280
   const height = portrait ? 1920 : 720
@@ -329,18 +334,23 @@ async function writeAssCaptions(clip, words, target, outputFormat, template) {
         return `${brk}${base}${label}`
       }).join(' ').replace(/ \\N/g, '\\N')
       const an = style.anchor ? `\\an${style.anchor}` : ''
+      const blurIn = style.blurIn ? '\\blur10\\t(0,320,\\blur0)' : ''
       const intro = wordIndex === 0
-        ? `{${an}\\fad(80,0)\\move(${width / 2},${baseY + 26},${width / 2},${baseY},0,140)}`
+        ? `{${an}\\fad(80,0)${blurIn}\\move(${width / 2},${baseY + 26},${width / 2},${baseY},0,140)}`
         : `{${an}\\pos(${width / 2},${baseY})}`
       events.push(`Dialogue: 0,${assTime(from)},${assTime(to)},Default,,0,0,0,,${intro}${text}`)
     })
   })
+  for (const overlay of overlays) {
+    events.push(`Dialogue: 1,${assTime(overlay.from)},${assTime(overlay.to)},Cta,,0,0,0,,{\\an8\\pos(${width / 2},${Math.round(height * 0.16)})\\fad(150,0)}${assEscape(overlay.text)}`)
+  }
   if (!events.length) return false
   const margin = portrait ? 110 : 110
   const content = [
     '[Script Info]', 'ScriptType: v4.00+', `PlayResX: ${width}`, `PlayResY: ${height}`, 'WrapStyle: 0', 'ScaledBorderAndShadow: yes',
     '', '[V4+ Styles]', 'Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
     `Style: Default,${style.font},${size},${style.spoken.c},&H000000FF,${style.outlineColor},&H90000000,${style.bold},${style.italic},0,0,100,100,${style.spacing},0,1,${style.outline},${style.shadow},2,${margin},${margin},60,1`,
+    `Style: Cta,${style.font},${Math.round(size * 0.7)},&H00FFFFFF,&H000000FF,&H00000000,&H9A000000,-1,0,0,0,100,100,0,0,3,10,0,8,60,60,60,1`,
     '', '[Events]', 'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text', ...events,
   ].join('\n')
   await fs.writeFile(target, content, 'utf8')
@@ -419,18 +429,41 @@ async function trackFaceCrop(source, clip) {
   return terms.join('+')
 }
 
+function subtitlesFilterFor(assFile) {
+  return `subtitles='${assFile.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'")}'`
+}
+
+// Caption saja di atas latar hijau (#00FF00) supaya bisa di-chroma key di editor.
+async function renderCaptionLayer(assFile, target, duration, outputFormat) {
+  const size = outputFormat === 'portrait' ? '1080x1920' : '1280x720'
+  const args = ['-y', '-f', 'lavfi', '-i', `color=c=0x00FF00:s=${size}:r=30:d=${duration}`, '-vf', subtitlesFilterFor(assFile), '-an', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', target]
+  await runCommand(ffmpegPath, args, () => {})
+}
+
 async function cutClip(source, target, clip, options, assFile, update) {
-  const { muteMusic, outputFormat, cropX } = options
+  const { muteMusic, outputFormat, portraitMode, cropX } = options
   const audioFilters = muteMusic ? ['highpass=f=80', 'lowpass=f=8000', 'afftdn=nr=12:nf=-25'] : []
   const portrait = outputFormat === 'portrait'
-  const videoFilters = portrait
-    ? (cropX ? ['scale=-2:1920', `crop=1080:1920:x='${cropX}':y=0`, 'setsar=1'] : ['scale=1080:1920:force_original_aspect_ratio=increase', 'crop=1080:1920', 'setsar=1'])
-    : ['scale=1280:720:force_original_aspect_ratio=decrease', 'pad=1280:720:(ow-iw)/2:(oh-ih)/2', 'setsar=1']
-  if (assFile) {
-    const safePath = assFile.replace(/\\/g, '\\\\').replace(/:/g, '\\:').replace(/'/g, "\\'")
-    videoFilters.push(`subtitles='${safePath}'`)
+  const blur = portrait && portraitMode === 'blur'
+  const subtitlesFilter = assFile ? subtitlesFilterFor(assFile) : null
+  let videoArgs
+  if (blur) {
+    // Frame landscape utuh di tengah 9:16, bagian atas-bawah diisi versi blur dari frame yang sama.
+    const stages = [
+      '[0:v]split=2[bg][fg]',
+      '[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=luma_radius=40:luma_power=2[blurred]',
+      '[fg]scale=1080:1920:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1[sharp]',
+      `[blurred][sharp]overlay=(W-w)/2:(H-h)/2${subtitlesFilter ? `,${subtitlesFilter}` : ''}[out]`,
+    ]
+    videoArgs = ['-filter_complex', stages.join(';'), '-map', '[out]']
+  } else {
+    const videoFilters = portrait
+      ? (cropX ? ['scale=-2:1920', `crop=1080:1920:x='${cropX}':y=0`, 'setsar=1'] : ['scale=1080:1920:force_original_aspect_ratio=increase', 'crop=1080:1920', 'setsar=1'])
+      : ['scale=1280:720:force_original_aspect_ratio=decrease', 'pad=1280:720:(ow-iw)/2:(oh-ih)/2', 'setsar=1']
+    if (subtitlesFilter) videoFilters.push(subtitlesFilter)
+    videoArgs = ['-map', '0:v:0', '-vf', videoFilters.join(',')]
   }
-  const args = ['-y', '-ss', String(clip.start), '-i', source, '-t', String(clip.duration), '-map', '0:v:0', '-map', '0:a:0?', '-vf', videoFilters.join(','), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p', '-movflags', '+faststart']
+  const args = ['-y', '-ss', String(clip.start), '-i', source, '-t', String(clip.duration), ...videoArgs, '-map', '0:a:0?', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '22', '-pix_fmt', 'yuv420p', '-movflags', '+faststart']
   if (audioFilters.length) args.push('-af', audioFilters.join(','))
   args.push('-c:a', 'aac', '-b:a', '128k', target)
   await runCommand(ffmpegPath, args, (line) => {
@@ -445,6 +478,19 @@ async function facePointsFor(source, start, duration) {
 }
 
 // Jump-cuts pauses longer than 0.8 s. Returns the trimmed file plus the clip/words remapped onto its own timeline.
+// Menyusun beat (hook → CTA) dari beberapa potongan sumber menjadi satu file, urut sesuai peran.
+async function assembleBeats(source, beats, target) {
+  await runCommand(ffmpegPath, buildBeatArgs(source, beats, target), () => {})
+}
+
+// Joins the rendered clips, in order, into one file. Paths go into the list file as absolute paths with quotes escaped.
+async function mergeClips(jobDir, clips, target) {
+  const listFile = path.join(jobDir, 'clips.txt')
+  const lines = clips.map((clip) => `file '${path.join(jobDir, clip.filename).replace(/'/g, "'\\''")}'`)
+  await fs.writeFile(listFile, lines.join('\n'))
+  await runCommand(ffmpegPath, buildConcatArgs(listFile, target), () => {})
+}
+
 async function trimSilentGaps(source, clip, words, target) {
   const silences = await detectSilences(ffmpegPath, source, clip.start, clip.duration)
   const keeps = buildKeepSegments(clip.duration, silences)
@@ -465,43 +511,55 @@ async function processJob(job) {
   const source = path.join(jobDir, 'source.mp4')
   await fs.mkdir(jobDir, { recursive: true })
   job.status = 'downloading'
-  job.message = 'Mengambil video dari YouTube'
-  await downloadYoutubeVideo(job.url, source, job)
+  if (job.uploadPath) {
+    job.message = 'Menyiapkan video lokal'
+    await fs.rename(job.uploadPath, source)
+    job.progress = 14
+  } else {
+    job.message = 'Mengambil video dari YouTube'
+    await downloadYoutubeVideo(job.url, source, job)
+  }
   const duration = await probeVideo(source)
   let captionCues = []
-  job.message = 'Mencari transkrip / auto-caption YouTube'
-  try {
-    await ytDlp.execPromise([
-      job.url, '--skip-download', '--no-playlist', '--no-warnings', '--write-auto-subs', '--write-subs',
-      '--ignore-errors', '--sub-langs', 'id,en,id-orig,en-orig', '--sub-format', 'vtt/best', '--output', path.join(jobDir, 'source.%(ext)s'),
-    ])
-    captionCues = await findCaptionCues(jobDir)
-  } catch (error) {
-    console.warn('Caption fetch:', String(error.message || error).split('\n').slice(-2).join(' '))
-    captionCues = await findCaptionCues(jobDir)
+  // Video lokal tidak punya auto-caption YouTube, jadi pengambilan caption dilewati.
+  if (!job.uploadPath) {
+    job.message = 'Mencari transkrip / auto-caption YouTube'
+    try {
+      await ytDlp.execPromise([
+        job.url, '--skip-download', '--no-playlist', '--no-warnings', '--write-auto-subs', '--write-subs',
+        '--ignore-errors', '--sub-langs', 'id,en,id-orig,en-orig', '--sub-format', 'vtt/best', '--output', path.join(jobDir, 'source.%(ext)s'),
+      ])
+      captionCues = await findCaptionCues(jobDir)
+    } catch (error) {
+      console.warn('Caption fetch:', String(error.message || error).split('\n').slice(-2).join(' '))
+      captionCues = await findCaptionCues(jobDir)
+    }
   }
   job.captionStatus = !job.captionsEnabled ? 'disabled' : captionCues.length ? 'available' : 'unavailable'
 
   job.status = 'processing'
   job.progress = 15
   let highlights
-  const apiKey = process.env.ANTHROPIC_API_KEY
+  const provider = LLM_PROVIDERS[process.env.CLIPFORGE_LLM_PROVIDER] ? process.env.CLIPFORGE_LLM_PROVIDER : 'anthropic'
+  const { label, envKey, defaultModel } = LLM_PROVIDERS[provider]
+  const apiKey = process.env[envKey]
   if (!apiKey) {
-    job.selectionNote = 'API key Claude belum diisi, memakai penilaian lokal.'
+    job.selectionNote = `API key ${label} belum diisi, memakai penilaian lokal.`
   } else if (!captionCues.length) {
     job.selectionNote = 'Tidak ada transkrip, memakai penilaian lokal.'
   } else {
     try {
       highlights = await selectClipsWithLlm({
-        client: new Anthropic({ apiKey }),
-        model: process.env.CLIPFORGE_LLM_MODEL || 'claude-opus-5-5',
+        provider,
+        apiKey,
+        model: process.env.CLIPFORGE_LLM_MODEL || defaultModel,
         words: captionCues, duration, maxClips: job.clipCount,
         onProgress: (message) => { job.message = message },
       })
       if (highlights?.length) Object.assign(job, { selectedBy: 'llm', scoredWithTranscript: true })
-      else job.selectionNote = 'Claude tidak menemukan momen yang valid, memakai penilaian lokal.'
+      else job.selectionNote = `${label} tidak menemukan momen yang valid, memakai penilaian lokal.`
     } catch (error) {
-      job.selectionNote = `Claude gagal, memakai penilaian lokal: ${error.message.slice(0, 160)}`
+      job.selectionNote = `${label} gagal, memakai penilaian lokal: ${error.message.slice(0, 160)}`
       console.warn('LLM selection:', error.message)
     }
   }
@@ -526,13 +584,31 @@ async function processJob(job) {
   }
   job.message = 'Memotong momen terbaik dengan FFmpeg'
   job.progress = 30
+  const segments = buildSegments(captionCues)
   for (let index = 0; index < highlights.length; index += 1) {
     const clip = highlights[index]
     const filename = `clip-${index + 1}.mp4`
+    // Setiap klip disusun dari enam beat (hook → CTA), dengan atau tanpa transkrip. Tanpa transkrip, beat diambil
+    // berurutan dari waktu video tanpa snap ke kalimat. Jika trim silence dipilih dan tidak ada transkrip, klip dipangkas jedanya.
+    const useBeats = captionCues.length > 0 || !job.trimSilence
+    const beats = useBeats ? (clip.beats?.length ? clip.beats : localBeats(clip.start, duration, segments)) : null
     let clipSource = source
     let cutInfo = clip
     let clipWords = captionCues
-    if (job.trimSilence) {
+    let sourceEnd = clip.start + clip.duration
+    if (beats?.length) {
+      job.message = `Menyusun struktur klip ${index + 1}`
+      const structuredFile = path.join(jobDir, `structure-${index + 1}.mp4`)
+      await assembleBeats(source, beats, structuredFile)
+      clipSource = structuredFile
+      cutInfo = { ...clip, start: 0, duration: Number(totalLength(beats).toFixed(2)) }
+      clipWords = remapWords(captionCues, 0, keepRanges(beats)).words
+      sourceEnd = Math.max(...beats.map((beat) => beat.end))
+      clip.start = Number(Math.min(...beats.map((beat) => beat.start)).toFixed(2))
+      clip.duration = cutInfo.duration
+      clip.structure = timelineOf(beats)
+      clip.beats = beats
+    } else if (job.trimSilence) {
       job.message = `Membuang jeda panjang di klip ${index + 1}`
       try {
         const trimmed = await trimSilentGaps(source, clip, captionCues, path.join(jobDir, `trim-${index + 1}.mp4`))
@@ -546,10 +622,13 @@ async function processJob(job) {
         console.warn('Trim silence:', error.message)
       }
     }
-    const assFile = clipWords.length ? path.join(jobDir, `clip-${index + 1}.ass`) : null
-    const hasCaptions = assFile && job.captionsEnabled ? await writeAssCaptions(cutInfo, clipWords, assFile, job.outputFormat, job.captionTemplate) : false
+    // Teks CTA hanya ada pada klip terstruktur; caption ikut dimatikan jika captionsEnabled false.
+    const overlays = beats?.length ? ctaOverlay(beats, job.ctaText) : []
+    const captionWords = job.captionsEnabled ? clipWords : []
+    const assFile = captionWords.length || overlays.length ? path.join(jobDir, `clip-${index + 1}.ass`) : null
+    const hasCaptions = assFile ? await writeAssCaptions(cutInfo, captionWords, assFile, job.outputFormat, job.captionTemplate, overlays) : false
     let cropX = null
-    if (job.faceTracking && job.outputFormat === 'portrait') {
+    if (job.faceTracking && job.outputFormat === 'portrait' && job.portraitMode === 'crop') {
       job.message = `Melacak wajah untuk klip ${index + 1}`
       try {
         cropX = await trackFaceCrop(clipSource, cutInfo)
@@ -559,13 +638,32 @@ async function processJob(job) {
       job.faceTracked = Boolean(cropX) || job.faceTracked
     }
     job.message = `Merender klip ${index + 1}`
-    await cutClip(clipSource, path.join(jobDir, filename), cutInfo, { ...job, cropX }, hasCaptions ? assFile : null, () => {})
+    // Mode caption terpisah: video tanpa caption, lalu caption dirender sendiri di latar hijau.
+    const burnCaptions = hasCaptions && !job.captionOnly
+    await cutClip(clipSource, path.join(jobDir, filename), cutInfo, { ...job, cropX }, burnCaptions ? assFile : null, () => {})
+    if (hasCaptions && job.captionOnly) {
+      job.message = `Merender caption klip ${index + 1}`
+      const captionFilename = `clip-${index + 1}-captions.mp4`
+      await renderCaptionLayer(assFile, path.join(jobDir, captionFilename), cutInfo.duration, job.outputFormat)
+      clip.captionFilename = captionFilename
+    }
     clip.filename = filename
-    clip.time = `${formatTime(clip.start)} — ${formatTime(clip.start + clip.duration)}`
+    clip.time = `${formatTime(clip.start)} — ${formatTime(sourceEnd)}`
     clip.durationLabel = formatTime(cutInfo.duration)
-    clip.hasCaptions = hasCaptions
+    clip.hasCaptions = hasCaptions && captionWords.length > 0
     clip.outputFormat = job.outputFormat
     job.progress = 30 + Math.round(((index + 1) / highlights.length) * 65)
+  }
+  // Mode caption terpisah menyimpan caption di file lain, jadi gabungan hanya dibuat untuk mode biasa.
+  if (highlights.length > 1 && !job.captionOnly) {
+    job.message = 'Menggabungkan semua klip menjadi satu video'
+    try {
+      await mergeClips(jobDir, highlights, path.join(jobDir, 'final.mp4'))
+      job.finalFilename = 'final.mp4'
+    } catch (error) {
+      job.finalError = error.message.slice(-200)
+      console.warn('Merge clips:', error.message)
+    }
   }
   job.status = 'completed'
   job.message = 'Analisis selesai'
@@ -576,14 +674,36 @@ async function processJob(job) {
 
 app.get('/api/health', (_request, response) => response.json({ ok: true, service: 'clipforge-processing' }))
 
+// Video lokal dikirim sebagai body biner mentah lalu disimpan dulu. Job memakai uploadId dari respons ini.
+app.post('/api/uploads', async (request, response) => {
+  const name = String(request.query.name || 'video.mp4')
+  const extension = path.extname(name).toLowerCase()
+  if (!videoExtensions.includes(extension)) return response.status(400).json({ error: 'Format video tidak didukung. Pakai MP4, MOV, MKV, WEBM, M4V, atau AVI.' })
+  const uploadId = crypto.randomUUID()
+  const target = path.join(uploadsDir, `${uploadId}${extension}`)
+  try {
+    await pipeline(request, createWriteStream(target))
+  } catch (error) {
+    await fs.rm(target, { force: true })
+    return response.status(500).json({ error: `Upload video gagal: ${error.message}` })
+  }
+  uploads.set(uploadId, { path: target, name, createdAt: Date.now() })
+  response.status(201).json({ uploadId, name })
+})
+
 app.post('/api/jobs', (request, response) => {
-  const { url, muteMusic = false, outputFormat = 'landscape', captionsEnabled = true, captionTemplate = 'clean', faceTracking = false, trimSilence = false, clipCount = 10 } = request.body || {}
-  if (!isYoutubeUrl(url)) return response.status(400).json({ error: 'Masukkan URL YouTube yang valid.' })
+  const { url, uploadId, muteMusic = false, outputFormat = 'landscape', portraitMode = 'crop', captionsEnabled = true, captionOnly = false, captionTemplate = 'clean', faceTracking = false, trimSilence = false, clipCount = 10, ctaText = '' } = request.body || {}
+  const upload = uploadId ? uploads.get(String(uploadId)) : null
+  if (uploadId && !upload) return response.status(404).json({ error: 'Video lokal tidak ditemukan. Pilih ulang file-nya.' })
+  if (!upload && !isYoutubeUrl(url)) return response.status(400).json({ error: 'Masukkan URL YouTube yang valid atau pilih video lokal.' })
   if (!['landscape', 'portrait'].includes(outputFormat)) return response.status(400).json({ error: 'Pilih output landscape atau portrait.' })
-  if (!['clean', 'bigword', 'highlight', 'serif', 'neon', 'editorial'].includes(captionTemplate)) return response.status(400).json({ error: 'Template caption tidak valid.' })
+  if (!['crop', 'blur'].includes(portraitMode)) return response.status(400).json({ error: 'Mode portrait tidak valid.' })
+  if (!['clean', 'neon', 'blurstack', 'kinetic', 'retro', 'offer'].includes(captionTemplate)) return response.status(400).json({ error: 'Template caption tidak valid.' })
   if (![3, 5, 7, 10].includes(Number(clipCount))) return response.status(400).json({ error: 'Jumlah klip harus 3, 5, 7, atau 10.' })
   const id = crypto.randomUUID()
-  const job = { id, url, clipCount: Number(clipCount), muteMusic: Boolean(muteMusic), outputFormat, captionsEnabled: Boolean(captionsEnabled), captionTemplate, faceTracking: Boolean(faceTracking), trimSilence: Boolean(trimSilence), status: 'queued', progress: 0, message: 'Menyiapkan job', clips: [] }
+  const ctaLabel = String(ctaText).trim().slice(0, 40) || 'Komen di bawah'
+  if (upload) uploads.delete(String(uploadId))
+  const job = { id, url: upload ? null : url, uploadPath: upload?.path, clipCount: Number(clipCount), muteMusic: Boolean(muteMusic), outputFormat, portraitMode, captionsEnabled: Boolean(captionsEnabled), captionOnly: Boolean(captionOnly), captionTemplate, faceTracking: Boolean(faceTracking), trimSilence: Boolean(trimSilence), ctaText: ctaLabel, status: 'queued', progress: 0, message: 'Menyiapkan job', clips: [] }
   jobs.set(id, job)
   processJob(job).catch((error) => {
     job.status = 'failed'
@@ -596,12 +716,12 @@ app.post('/api/jobs', (request, response) => {
 app.get('/api/jobs/:id', (request, response) => {
   const job = jobs.get(request.params.id)
   if (!job) return response.status(404).json({ error: 'Job tidak ditemukan.' })
-  response.json({ id: job.id, status: job.status, progress: job.progress, message: job.message, captionStatus: job.captionStatus, scoredWithTranscript: job.scoredWithTranscript, selectedBy: job.selectedBy, selectionNote: job.selectionNote, faceTracking: job.faceTracking, faceTracked: Boolean(job.faceTracked), clips: job.clips.map((clip) => ({ ...clip, downloadUrl: `/api/jobs/${job.id}/clips/${clip.filename}` })) })
+  response.json({ id: job.id, status: job.status, progress: job.progress, message: job.message, captionStatus: job.captionStatus, scoredWithTranscript: job.scoredWithTranscript, selectedBy: job.selectedBy, selectionNote: job.selectionNote, faceTracking: job.faceTracking, faceTracked: Boolean(job.faceTracked), finalDownloadUrl: job.finalFilename ? `/api/jobs/${job.id}/clips/${job.finalFilename}` : null, finalError: job.finalError || null, clips: job.clips.map((clip) => ({ ...clip, downloadUrl: `/api/jobs/${job.id}/clips/${clip.filename}`, captionDownloadUrl: clip.captionFilename ? `/api/jobs/${job.id}/clips/${clip.captionFilename}` : null, finalDownloadUrl: job.finalFilename ? `/api/jobs/${job.id}/clips/${job.finalFilename}` : null })) })
 })
 
 app.get('/api/jobs/:id/clips/:filename', async (request, response) => {
   const job = jobs.get(request.params.id)
-  if (!job || !job.clips.some((clip) => clip.filename === request.params.filename)) return response.status(404).json({ error: 'Klip tidak ditemukan.' })
+  if (!job || ![job.finalFilename, ...job.clips.flatMap((clip) => [clip.filename, clip.captionFilename])].includes(request.params.filename)) return response.status(404).json({ error: 'Klip tidak ditemukan.' })
   const filePath = path.join(jobsDir, job.id, request.params.filename)
   response.download(filePath, request.params.filename)
 })
@@ -631,6 +751,15 @@ setInterval(async () => {
     }
   } catch (error) {
     console.warn('Cleanup job lama:', error.message)
+  }
+}, 10 * 60 * 1000)
+
+// Upload yang tidak pernah dipakai job akan dihapus agar tidak memenuhi disk.
+setInterval(async () => {
+  for (const [uploadId, upload] of uploads) {
+    if (Date.now() - upload.createdAt < 60 * 60 * 1000) continue
+    uploads.delete(uploadId)
+    await fs.rm(upload.path, { force: true })
   }
 }, 10 * 60 * 1000)
 

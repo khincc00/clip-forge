@@ -7,5 +7,4 @@ desktop/node_modules
 desktop/release
 desktop/INSTALLER
 desktop/resources
-desktop/app/server
-desktop/app/dist
+!desktop/app/dist
