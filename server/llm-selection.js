@@ -1,4 +1,13 @@
+import Anthropic from '@anthropic-ai/sdk'
 import { buildSegments } from './scoring.js'
+
+// Penyedia AI yang didukung. envKey adalah variabel environment tempat key disimpan saat job berjalan.
+export const LLM_PROVIDERS = {
+  anthropic: { label: 'Claude', envKey: 'ANTHROPIC_API_KEY', defaultModel: 'claude-opus-5-5' },
+  google: { label: 'Gemini', envKey: 'GEMINI_API_KEY', defaultModel: 'gemini-3.5-flash' },
+  openai: { label: 'OpenAI', envKey: 'OPENAI_API_KEY', defaultModel: 'gpt-6-astra' },
+}
+const REFUSAL_REASONS = { google: ['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII'], openai: ['content_filter'] }
 
 const MIN_CLIP = 15
 const MAX_CLIP = 60
@@ -95,9 +104,61 @@ function pickClips(candidates, maxClips) {
   return picks
 }
 
-// Asks Claude to pick clips window by window. Returns null when nothing usable came back,
+async function postJson(url, headers, body) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+  })
+  const data = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(data?.error?.message || `HTTP ${response.status}`)
+  return data
+}
+
+// Returns ask(system, user) -> text for the chosen provider. Google and OpenAI use their REST APIs directly,
+// so only the Anthropic SDK is needed as a dependency.
+function createCaller({ provider, apiKey, model }) {
+  if (provider === 'anthropic') {
+    const client = new Anthropic({ apiKey })
+    return async (system, user) => {
+      const response = await client.messages.create({ model, max_tokens: 8000, system, messages: [{ role: 'user', content: user }] })
+      if (response.stop_reason === 'refusal') throw new Error('Model menolak memproses transkrip ini')
+      return response.content.filter((block) => block.type === 'text').map((block) => block.text).join('')
+    }
+  }
+  if (provider === 'google') {
+    return async (system, user) => {
+      const data = await postJson(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, { 'x-goog-api-key': apiKey }, {
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ role: 'user', parts: [{ text: user }] }],
+        generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 16000 },
+      })
+      const candidate = data.candidates?.[0]
+      if (REFUSAL_REASONS.google.includes(candidate?.finishReason)) throw new Error('Model menolak memproses transkrip ini')
+      return (candidate?.content?.parts || []).map((part) => part.text || '').join('')
+    }
+  }
+  if (provider === 'openai') {
+    return async (system, user) => {
+      const data = await postJson('https://api.openai.com/v1/chat/completions', { authorization: `Bearer ${apiKey}` }, {
+        model,
+        messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+        response_format: { type: 'json_object' },
+        max_completion_tokens: 16000,
+      })
+      const choice = data.choices?.[0]
+      if (REFUSAL_REASONS.openai.includes(choice?.finish_reason) || choice?.message?.refusal) throw new Error('Model menolak memproses transkrip ini')
+      return choice?.message?.content || ''
+    }
+  }
+  throw new Error(`Penyedia AI tidak dikenal: ${provider}`)
+}
+
+// Asks the chosen AI provider to pick clips window by window. Returns null when nothing usable came back,
 // so the caller can fall back to the local scorer.
-export async function selectClipsWithLlm({ client, model, words, duration, maxClips, onProgress }) {
+export async function selectClipsWithLlm({ provider, apiKey, model, words, duration, maxClips, onProgress }) {
+  const ask = createCaller({ provider, apiKey, model })
+  const label = LLM_PROVIDERS[provider].label
   const segments = buildSegments(words)
   if (!segments.length) return null
   const context = {
@@ -114,18 +175,8 @@ export async function selectClipsWithLlm({ client, model, words, duration, maxCl
       .filter((segment) => segment.start >= window.start && segment.start < window.end)
       .map((segment) => `[${formatTime(segment.start)}] ${segment.text}`)
     if (!lines.length) continue
-    onProgress?.(`Claude menilai momen (${index + 1}/${windows.length})`)
-    const response = await client.messages.create({
-      model,
-      max_tokens: 8000,
-      system: SYSTEM,
-      messages: [{
-        role: 'user',
-        content: `Pick up to ${maxClips} clips from this part of the video (${formatTime(window.start)} to ${formatTime(window.end)}).\n\n${lines.join('\n')}`,
-      }],
-    })
-    if (response.stop_reason === 'refusal') throw new Error('Model menolak memproses transkrip ini')
-    const text = response.content.filter((block) => block.type === 'text').map((block) => block.text).join('')
+    onProgress?.(`${label} menilai momen (${index + 1}/${windows.length})`)
+    const text = await ask(SYSTEM, `Pick up to ${maxClips} clips from this part of the video (${formatTime(window.start)} to ${formatTime(window.end)}).\n\n${lines.join('\n')}`)
     candidates.push(...parseCandidates(text, context))
   }
 
