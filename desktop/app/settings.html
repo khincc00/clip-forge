@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'">
-  <title>Pengaturan Claude API</title>
+  <title>Pengaturan API AI</title>
   <style>
     body { margin: 0; padding: 24px; background: #171c1b; color: #e8ece9; font: 14px -apple-system, BlinkMacSystemFont, sans-serif; }
     h1 { font-size: 18px; margin: 0 0 6px; }
@@ -22,20 +22,21 @@
   </style>
 </head>
 <body>
-  <h1>Pengaturan Claude API</h1>
-  <p>Key dipakai untuk memilih momen terbaik dari transkrip video. Tanpa key, ClipForge memakai penilaian lokal. Biaya pemakaian ditagih oleh Anthropic sesuai jumlah token.</p>
+  <h1>Pengaturan API AI</h1>
+  <p>Pilih penyedia AI untuk memilih momen terbaik dari transkrip video. Tanpa key, ClipForge memakai penilaian lokal. Biaya pemakaian ditagih langsung oleh penyedia sesuai jumlah token.</p>
 
   <form>
+    <label for="provider">Penyedia AI</label>
+    <select id="provider"></select>
+
     <label for="apiKey">API key</label>
-    <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…">
+    <input id="apiKey" type="password" autocomplete="off" spellcheck="false">
     <div id="keyState" class="state"></div>
 
     <label for="model">Model</label>
-    <select id="model">
-      <option value="claude-opus-5-5">Opus 5.5 (kualitas terbaik)</option>
-      <option value="claude-sonnet-5-5">Sonnet 5.5 (seimbang)</option>
-      <option value="claude-haiku-5-5">Haiku 5.5 (paling murah)</option>
-    </select>
+    <input id="model" list="modelOptions" autocomplete="off" spellcheck="false">
+    <datalist id="modelOptions"></datalist>
+    <div class="state">Bisa diisi dengan ID model lain dari akun penyedia kamu.</div>
 
     <div class="actions">
       <button type="submit">Simpan</button>

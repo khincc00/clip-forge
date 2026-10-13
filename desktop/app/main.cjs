@@ -3,55 +3,92 @@ const path = require('node:path')
 const fs = require('node:fs')
 const { pathToFileURL } = require('node:url')
 
-const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']
-const DEFAULT_MODEL = 'claude-opus-5-5'
+// Penyedia AI yang didukung. Model boleh diganti dengan ID lain dari akun penyedia.
+const PROVIDERS = {
+  anthropic: { label: 'Claude (Anthropic)', envKey: 'ANTHROPIC_API_KEY', prefix: 'sk-ant-', defaultModel: 'claude-opus-5-5', models: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'] },
+  google: { label: 'Google Gemini', envKey: 'GEMINI_API_KEY', prefix: 'AIza', defaultModel: 'gemini-3.5-flash', models: ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-pro-preview'] },
+  openai: { label: 'OpenAI', envKey: 'OPENAI_API_KEY', prefix: 'sk-', defaultModel: 'gpt-6-astra', models: ['gpt-6-astra'] },
+}
+const DEFAULT_PROVIDER = 'anthropic'
+const MODEL_PATTERN = /^[\w.:/-]{1,100}$/
 
 let mainWindow
 let settingsWindow
 
-// The API key is stored encrypted with the OS keychain (safeStorage), never in plain text.
+// The API keys are stored encrypted with the OS keychain (safeStorage), never in plain text.
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json')
+
+// Settings lama hanya menyimpan satu key Claude (apiKey + model). Bentuknya dipindahkan ke format per penyedia.
+function normalizeSettings(raw) {
+  const keys = { ...(raw.keys || {}) }
+  const models = { ...(raw.models || {}) }
+  if (raw.apiKey && !keys.anthropic) keys.anthropic = raw.apiKey
+  if (raw.model && !models.anthropic) models.anthropic = raw.model
+  for (const [id, config] of Object.entries(PROVIDERS)) {
+    if (!models[id]) models[id] = config.defaultModel
+  }
+  const provider = PROVIDERS[raw.provider] ? raw.provider : DEFAULT_PROVIDER
+  return { provider, keys, models }
+}
 
 function readSettings() {
   try {
-    return JSON.parse(fs.readFileSync(settingsFile(), 'utf8'))
+    return normalizeSettings(JSON.parse(fs.readFileSync(settingsFile(), 'utf8')))
   } catch {
-    return {}
+    return normalizeSettings({})
   }
 }
 
-// Puts the saved key and model into the environment the server reads when a job starts.
+// Puts the saved keys and the active provider into the environment the server reads when a job starts.
 function applySettings() {
   const settings = readSettings()
-  if (settings.apiKey && safeStorage.isEncryptionAvailable()) {
+  for (const [id, config] of Object.entries(PROVIDERS)) {
+    const stored = settings.keys[id]
+    if (!stored || !safeStorage.isEncryptionAvailable()) continue
     try {
-      process.env.ANTHROPIC_API_KEY = safeStorage.decryptString(Buffer.from(settings.apiKey, 'base64'))
+      process.env[config.envKey] = safeStorage.decryptString(Buffer.from(stored, 'base64'))
     } catch (error) {
-      console.warn('API key tidak bisa dibuka:', error.message)
+      console.warn(`API key ${config.label} tidak bisa dibuka:`, error.message)
     }
   }
-  process.env.CLIPFORGE_LLM_MODEL = MODELS.includes(settings.model) ? settings.model : DEFAULT_MODEL
+  process.env.CLIPFORGE_LLM_PROVIDER = settings.provider
+  process.env.CLIPFORGE_LLM_MODEL = settings.models[settings.provider]
 }
 
 function settingsStatus() {
   const settings = readSettings()
-  return { hasKey: Boolean(settings.apiKey), model: MODELS.includes(settings.model) ? settings.model : DEFAULT_MODEL }
+  return {
+    provider: settings.provider,
+    models: settings.models,
+    hasKey: Object.fromEntries(Object.keys(PROVIDERS).map((id) => [id, Boolean(settings.keys[id])])),
+    providers: Object.entries(PROVIDERS).map(([id, config]) => ({
+      id,
+      label: config.label,
+      prefix: config.prefix,
+      defaultModel: config.defaultModel,
+      models: config.models,
+    })),
+  }
 }
 
-function saveSettings({ apiKey = '', model, clearKey = false } = {}) {
-  const current = readSettings()
-  const next = { model: MODELS.includes(model) ? model : DEFAULT_MODEL }
+function saveSettings({ provider, apiKey = '', model = '', clearKey = false } = {}) {
+  if (!PROVIDERS[provider]) throw new Error('Penyedia AI tidak dikenal.')
+  const config = PROVIDERS[provider]
+  const settings = readSettings()
+  settings.provider = provider
+  const modelId = String(model).trim()
+  if (modelId && !MODEL_PATTERN.test(modelId)) throw new Error('ID model hanya boleh berisi huruf, angka, titik, titik dua, garis miring, atau strip.')
+  settings.models[provider] = modelId || config.defaultModel
   if (clearKey) {
-    delete process.env.ANTHROPIC_API_KEY
+    delete settings.keys[provider]
+    delete process.env[config.envKey]
   } else if (apiKey.trim()) {
     const key = apiKey.trim()
-    if (!key.startsWith('sk-ant-')) throw new Error('API key harus diawali sk-ant-.')
+    if (!key.startsWith(config.prefix)) throw new Error(`API key ${config.label} harus diawali ${config.prefix}.`)
     if (!safeStorage.isEncryptionAvailable()) throw new Error('Penyimpanan aman tidak tersedia di perangkat ini.')
-    next.apiKey = safeStorage.encryptString(key).toString('base64')
-  } else if (current.apiKey) {
-    next.apiKey = current.apiKey
+    settings.keys[provider] = safeStorage.encryptString(key).toString('base64')
   }
-  fs.writeFileSync(settingsFile(), JSON.stringify(next, null, 2), { mode: 0o600 })
+  fs.writeFileSync(settingsFile(), JSON.stringify(settings, null, 2), { mode: 0o600 })
   applySettings()
   return settingsStatus()
 }
@@ -63,9 +100,9 @@ function openSettings() {
   }
   settingsWindow = new BrowserWindow({
     width: 480,
-    height: 430,
+    height: 500,
     resizable: false,
-    title: 'Pengaturan Claude API',
+    title: 'Pengaturan API AI',
     backgroundColor: '#171c1b',
     webPreferences: { preload: path.join(__dirname, 'settings-preload.cjs') },
   })
@@ -78,7 +115,7 @@ function buildMenu() {
     {
       label: app.name,
       submenu: [
-        { label: 'Pengaturan Claude API…', accelerator: 'CmdOrCtrl+,', click: openSettings },
+        { label: 'Pengaturan API AI…', accelerator: 'CmdOrCtrl+,', click: openSettings },
         { type: 'separator' },
         { role: 'hide' },
         { role: 'hideOthers' },
